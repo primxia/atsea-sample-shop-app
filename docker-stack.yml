@@ -1,34 +1,81 @@
+# compose文件格式的版本号（如果用stack需要是 >= 3.0 才可以）
+# Stack 文件 就是 Docker Compose 文件。 唯一 的 要求 就是 version： 一项 需要 是“ 3. 0” 或者 更 高的 值。
 version: "3.2"
 
+
+# 网络（定义了三个网络， 默认是overlay驱动类型，然后对于支付我们加密了其数据层）
+# 网络会在service和secrets之前创建完成
+networks:
+  front-tier:
+  back-tier:
+  payment:
+    driver: overlay
+    driver_opts:
+      encrypted: 'yes'
+
+
+# 应用要用到的密钥（external为true，代表在stack部署之前，密钥必须要已经存在）
+secrets:
+  postgres_password:
+    external: true
+  staging_token:
+    external: true
+  revprox_key:
+    external: true
+  revprox_cert:
+    external: true
+
+
+# 服务
 services:
+  # nginx路由服务
   reverse_proxy:
+    # 自定义镜像（镜像必须存在，不能在deploy的时候临时构建，这个也是stack和compose的区别）
     image: dockersamples/atseasampleshopapp_reverse_proxy
+    # 端口（将swarm节点的每个80端口映射到容器的80端口，443也一样）
+    # 可以
+    # ports:
+    #   - target: 80
+    #   - published: 80
+    #   - mode: host
     ports:
       - "80:80"
       - "443:443"
+    # 密钥 密钥以普通文件的形式被挂载到服务副本当中。文件的名称就是stack文件中定义的target属性的值，其在Linux下的路径为/run/secrets/xxx
     secrets:
       - source: revprox_cert
         target: revprox_cert
       - source: revprox_key
         target: revprox_key
+    # 网络（如果这里使用的网络不存在，docker会建立一个overly类型的网络）
     networks:
       - front-tier
-
+  # 数据库服务
   database:
     image: dockersamples/atsea_db
+    # 环境变量
     environment:
+      # 用户
       POSTGRES_USER: gordonuser
+      # 数据库密码存放位置（挂载到每个服务副本的密钥）
       POSTGRES_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      # 数据库name
       POSTGRES_DB: atsea
     networks:
       - back-tier
     secrets:
       - postgres_password
+    # 部署约束（只在worker工作节点上进行部署）
+    # 节点 ID，如 node.id==o2p4kw2uuw2a
+    # 节点 名称， 如 node.hostname==wrk-12
+    # 节点 角色， 如 node.role!=manager
+    # 节点 引擎 标签， 如 engine.labels.operatingsystem==ubuntu16.04
+    # 节点 自定义 标签， 如 node.labels.zone==prod1
     deploy:
       placement:
         constraints:
           - 'node.role == worker'
-
+  # 主要后端服务
   appserver:
     image: dockersamples/atsea_app
     networks:
@@ -36,13 +83,18 @@ services:
       - back-tier
       - payment
     deploy:
+      # 期望副本数量，默认为1
       replicas: 2
+      # 在滚动升级的时候如何操作
       update_config:
+        # 每次更新两个副本
         parallelism: 2
+        # 更新失败则回滚，默认操作是pause（在升级失败后阻止其他副本的升级）
         failure_action: rollback
       placement:
         constraints:
           - 'node.role == worker'
+      # 当前 服务 的 重 启 策略 是， 如果 某个 副本 以 非 0 返回 值 退出（ condition: onfailure）， 会 立即 重 启 当前 副本。 重 启 最多 重试 3 次， 每次 都会 等待 至多 120s 来 检测 是否 启动 成功。 每次 重 启 的 间隔 是 5s。
       restart_policy:
         condition: on-failure
         delay: 5s
@@ -50,11 +102,12 @@ services:
         window: 120s
     secrets:
       - postgres_password
-
+  # 前端服务
   visualizer:
     image: dockersamples/visualizer:stable
     ports:
       - "8001:8080"
+    # 调整 默认 为 10s 的 优雅 停止 时 长（超过这个时间就会被强制停止）
     stop_grace_period: 1m30s
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
@@ -64,7 +117,7 @@ services:
       placement:
         constraints:
           - 'node.role == manager'
-
+  # 支付服务
   payment_gateway:
     image: dockersamples/atseasampleshopapp_payment_gateway
     secrets:
@@ -79,21 +132,3 @@ services:
         constraints:
           - 'node.role == worker'
           - 'node.labels.pcidss == yes'
-
-networks:
-  front-tier:
-  back-tier:
-  payment:
-    driver: overlay
-    driver_opts:
-      encrypted: 'yes'
-
-secrets:
-  postgres_password:
-    external: true
-  staging_token:
-    external: true
-  revprox_key:
-    external: true
-  revprox_cert:
-    external: true
